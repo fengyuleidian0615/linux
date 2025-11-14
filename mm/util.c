@@ -26,6 +26,7 @@
 #include <linux/compat.h>
 #include <linux/fsnotify.h>
 #include <linux/page_idle.h>
+#include <linux/set_memory.h>
 
 #include <linux/uaccess.h>
 
@@ -584,6 +585,8 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 		userfaultfd_unmap_complete(mm, &uf);
 		if (populate)
 			mm_populate(ret, populate);
+		if (!IS_ERR_VALUE(ret) && (flag & MAP_TVM_SHARED))
+			set_memory_decrypted(ret, len);
 	}
 	return ret;
 }
