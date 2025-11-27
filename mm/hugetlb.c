@@ -39,6 +39,7 @@
 #include <linux/memory.h>
 #include <linux/mm_inline.h>
 #include <linux/padata.h>
+#include <linux/set_memory.h>
 
 #include <asm/page.h>
 #include <asm/pgalloc.h>
@@ -5996,6 +5997,11 @@ void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct *vma,
 
 		tlb_remove_page_size(tlb, folio_page(folio, 0),
 				     folio_size(folio));
+
+		if (vma->vm_flags & VM_TEE_SHARED) {
+			struct page *p = folio_page(folio, 0);
+			set_memory_encrypted(page_address(p), 512);
+		}
 		/*
 		 * If we were instructed to unmap a specific folio, we're done.
 		 */
@@ -6605,6 +6611,11 @@ static vm_fault_t hugetlb_no_page(struct address_space *mapping,
 	}
 
 	spin_unlock(vmf->ptl);
+
+	if (vma->vm_flags & VM_TEE_SHARED) {
+		struct page *p = folio_page(folio, 0);
+		set_memory_decrypted(page_address(p), 512);
+	}
 
 	/*
 	 * Only set hugetlb_migratable in newly allocated pages.  Existing pages

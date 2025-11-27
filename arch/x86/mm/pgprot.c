@@ -5,7 +5,7 @@
 #include <asm/pgtable.h>
 #include <asm/mem_encrypt.h>
 
-static pgprot_t protection_map[16] __ro_after_init = {
+static pgprot_t protection_map[64] __ro_after_init = {
 	[VM_NONE]					= PAGE_NONE,
 	[VM_READ]					= PAGE_READONLY,
 	[VM_WRITE]					= PAGE_COPY,
@@ -58,6 +58,8 @@ pgprot_t vm_get_page_prot(vm_flags_t vm_flags)
 	val = __sme_set(val);
 	if (val & _PAGE_PRESENT)
 		val &= __supported_pte_mask;
+	if (vm_flags & VM_TEE_SHARED)
+		val |= cc_mkdec(val);
 	return __pgprot(val);
 }
 EXPORT_SYMBOL(vm_get_page_prot);
