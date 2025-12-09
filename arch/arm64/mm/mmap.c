@@ -120,6 +120,8 @@ pgprot_t vm_get_page_prot(vm_flags_t vm_flags)
 	}
 #endif
 
+	if (vm_flags & VM_TEE_SHARED)
+		val |= PROT_NS_SHARED;
 	return __pgprot(prot);
 }
 EXPORT_SYMBOL(vm_get_page_prot);
