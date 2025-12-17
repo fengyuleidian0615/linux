@@ -76,6 +76,7 @@
 #include <linux/ptrace.h>
 #include <linux/vmalloc.h>
 #include <linux/sched/sysctl.h>
+#include <linux/set_memory.h>
 
 #include <trace/events/kmem.h>
 
@@ -1640,6 +1641,8 @@ static __always_inline void zap_present_folio_ptes(struct mmu_gather *tlb,
 		/* We don't need up-to-date accessed/dirty bits. */
 		clear_full_ptes(mm, addr, pte, nr, tlb->fullmm);
 		rss[MM_ANONPAGES] -= nr;
+		if (vma->vm_flags & VM_TEE_SHARED)
+			set_memory_encrypted((unsigned long)page_address(page), nr);
 	}
 	/* Checking a single PTE in a batch is sufficient. */
 	arch_check_zapped_pte(vma, ptent);
@@ -5235,6 +5238,13 @@ setpte:
 
 	/* No need to invalidate - it was non-present before */
 	update_mmu_cache_range(vmf, vma, addr, vmf->pte, nr_pages);
+	if (vma->vm_flags & VM_TEE_SHARED) {
+		struct page *p = folio_page(folio, 0);
+		set_memory_decrypted((unsigned long)page_address(p), 1);
+	}
+	if (vmf->pte)
+		pte_unmap_unlock(vmf->pte, vmf->ptl);
+	return ret;
 unlock:
 	if (vmf->pte)
 		pte_unmap_unlock(vmf->pte, vmf->ptl);

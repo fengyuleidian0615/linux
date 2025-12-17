@@ -39,6 +39,7 @@
 #include <linux/compat.h>
 #include <linux/pgalloc_tag.h>
 #include <linux/pagewalk.h>
+#include <linux/set_memory.h>
 
 #include <asm/tlb.h>
 #include <asm/pgalloc.h>
@@ -1275,6 +1276,10 @@ static vm_fault_t __do_huge_pmd_anonymous_page(struct vm_fault *vmf)
 		mm_inc_nr_ptes(vma->vm_mm);
 		deferred_split_folio(folio, false);
 		spin_unlock(vmf->ptl);
+		if (vma->vm_flags & VM_TEE_SHARED) {
+			struct page *p = folio_page(folio, 0);
+			set_memory_decrypted((unsigned long )page_address(p), folio_nr_pages(folio));
+		}
 	}
 
 	return 0;
@@ -2241,6 +2246,11 @@ int zap_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 		}
 
 		spin_unlock(ptl);
+		if ((vma->vm_flags & VM_TEE_SHARED) && pmd_present(orig_pmd)){
+			struct page *page = pmd_page(orig_pmd);
+
+			set_memory_encrypted((unsigned long)page_address(page), folio_nr_pages(folio));
+		}
 		if (flush_needed)
 			tlb_remove_page_size(tlb, &folio->page, HPAGE_PMD_SIZE);
 	}
