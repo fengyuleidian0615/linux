@@ -58,6 +58,7 @@ static LIST_HEAD(sgx_dirty_page_list);
 static unsigned long __sgx_sanitize_pages(struct list_head *dirty_page_list)
 {
 	unsigned long left_dirty = 0;
+	unsigned long count = 0;
 	struct sgx_epc_page *page;
 	LIST_HEAD(dirty);
 	int ret;
@@ -101,7 +102,9 @@ static unsigned long __sgx_sanitize_pages(struct list_head *dirty_page_list)
 			left_dirty++;
 		}
 
-		cond_resched();
+		count++;
+		if ((count & 0x7FFF) == 0)
+			schedule_timeout_interruptible(1);
 	}
 
 	list_splice(&dirty, dirty_page_list);
