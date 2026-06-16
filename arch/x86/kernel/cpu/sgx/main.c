@@ -48,6 +48,15 @@ static struct sgx_numa_node *sgx_numa_nodes;
 static LIST_HEAD(sgx_dirty_page_list);
 
 /*
+ * Force a voluntary context switch every SGX_SANITIZE_RESCHED_INTERVAL
+ * iterations to let synchronize_rcu_tasks() (e.g. called by BPF LSM at
+ * init) complete its grace period.  On isolated CPUs, cond_resched() alone
+ * is insufficient because TIF_NEED_RESCHED is never set when no competing
+ * runnable task exists on that CPU.
+ */
+#define SGX_SANITIZE_RESCHED_INTERVAL	(1 << 15)
+
+/*
  * Reset post-kexec EPC pages to the uninitialized state. The pages are removed
  * from the input list, and made available for the page allocator. SECS pages
  * prepending their children in the input list are left intact.
@@ -58,6 +67,7 @@ static LIST_HEAD(sgx_dirty_page_list);
 static unsigned long __sgx_sanitize_pages(struct list_head *dirty_page_list)
 {
 	unsigned long left_dirty = 0;
+	unsigned long count = 0;
 	struct sgx_epc_page *page;
 	LIST_HEAD(dirty);
 	int ret;
@@ -66,6 +76,20 @@ static unsigned long __sgx_sanitize_pages(struct list_head *dirty_page_list)
 	while (!list_empty(dirty_page_list)) {
 		if (kthread_should_stop())
 			return 0;
+
+		/*
+		 * On isolated CPUs cond_resched() does not trigger a real
+		 * context switch when no competing runnable task exists.
+		 * Periodically force ksgxd to sleep so that callers of
+		 * synchronize_rcu_tasks() (e.g. BPF LSM) can observe a
+		 * quiescent state and complete the grace period in bounded time.
+		 * Use cond_resched() between forced sleeps to remain responsive
+		 * to higher-priority tasks.
+		 */
+		if (!(++count & (SGX_SANITIZE_RESCHED_INTERVAL - 1)))
+			schedule_timeout_interruptible(1);
+		else
+			cond_resched();
 
 		page = list_first_entry(dirty_page_list, struct sgx_epc_page, list);
 
@@ -100,8 +124,6 @@ static unsigned long __sgx_sanitize_pages(struct list_head *dirty_page_list)
 			list_move_tail(&page->list, &dirty);
 			left_dirty++;
 		}
-
-		cond_resched();
 	}
 
 	list_splice(&dirty, dirty_page_list);
