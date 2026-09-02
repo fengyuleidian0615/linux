@@ -2424,6 +2424,10 @@ static int setup_tdparams(struct kvm *kvm, struct td_params *td_params,
 	if (ret)
 		return ret;
 
+	if (tdx_sysinfo->features.tdx_features0 & TDX_FEATURES0_TDXCONNECT) {
+		pr_info("%s enabled td params TDX_CONNECT\n", __func__);
+		td_params->config_flags |= TDCS_CONFIG_TDX_CONNECT;
+	}
 #define MEMCPY_SAME_SIZE(dst, src)				\
 	do {							\
 		BUILD_BUG_ON(sizeof(dst) != sizeof(src));	\

@@ -1002,6 +1002,7 @@ static __init int config_tdx_module(struct tdmr_info_list *tdmr_list,
 				    u64 global_keyid)
 {
 	struct tdx_module_args args = {};
+	u64 seamcall_fn = TDH_SYS_CONFIG_V0;
 	u64 *tdmr_pa_array;
 	size_t array_sz;
 	int i, ret;
@@ -1026,7 +1027,15 @@ static __init int config_tdx_module(struct tdmr_info_list *tdmr_list,
 	args.rcx = __pa(tdmr_pa_array);
 	args.rdx = tdmr_list->nr_consumed_tdmrs;
 	args.r8 = global_keyid;
-	ret = seamcall_prerr(TDH_SYS_CONFIG, &args);
+
+	if (tdx_sysinfo.features.tdx_features0 & TDX_FEATURES0_TDXCONNECT) {
+		args.r9 |= TDX_FEATURES0_TDXCONNECT;
+		args.r11 = ktime_get_real_seconds();
+		/* These parameters requires version >= 1 */
+		seamcall_fn = TDH_SYS_CONFIG;
+	}
+
+	ret = seamcall_prerr(seamcall_fn, &args);
 
 	/* Free the array as it is not required anymore. */
 	kfree(tdmr_pa_array);
