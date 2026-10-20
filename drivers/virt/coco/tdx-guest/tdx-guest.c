@@ -12,6 +12,7 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
 #include <linux/set_memory.h>
@@ -210,6 +211,55 @@ static long tdx_get_report0(struct tdx_report_req __user *req)
 			     USER_SOCKPTR(req->tdreport));
 }
 
+static long tdx_get_sealing_key(struct tdx_sealing_key_req __user *req)
+{
+	struct tdx_sealing_key_req key_req;
+	void *request;
+	u8 *key;
+	int ret;
+
+	if (copy_from_user(&key_req, req, sizeof(key_req)))
+		return -EFAULT;
+
+	/* Requestor info is an 8-bit field; the TDX module allows 0..3. */
+	if (key_req.requestor > 3)
+		return -EINVAL;
+
+	/*
+	 * TDG.MR.KEY.GET requires the TDKEYREQUEST to be 128-byte aligned and
+	 * the key output to be 32-byte aligned. kmalloc() guarantees alignment
+	 * to the (power-of-two) allocation size, satisfying both. The buffers
+	 * are also physically contiguous, so virt_to_phys() in the TDCALL
+	 * wrapper is valid.
+	 */
+	request = kmalloc(sizeof(key_req.key_request), GFP_KERNEL);
+	if (!request)
+		return -ENOMEM;
+
+	key = kmalloc(sizeof(key_req.key), GFP_KERNEL);
+	if (!key) {
+		ret = -ENOMEM;
+		goto out_free_request;
+	}
+
+	memcpy(request, &key_req.key_request, sizeof(key_req.key_request));
+
+	ret = tdx_mcall_get_sealing_key(request, key, key_req.requestor);
+	if (ret)
+		goto out_free_key;
+
+	memcpy(key_req.key, key, sizeof(key_req.key));
+
+	if (copy_to_user(req, &key_req, sizeof(key_req)))
+		ret = -EFAULT;
+
+out_free_key:
+	kfree(key);
+out_free_request:
+	kfree(request);
+	return ret;
+}
+
 static void free_quote_buf(void *buf)
 {
 	size_t len = PAGE_ALIGN(GET_QUOTE_BUF_SIZE);
@@ -368,6 +418,8 @@ static long tdx_guest_ioctl(struct file *file, unsigned int cmd,
 	switch (cmd) {
 	case TDX_CMD_GET_REPORT0:
 		return tdx_get_report0((struct tdx_report_req __user *)arg);
+	case TDX_CMD_GET_SEALING_KEY:
+		return tdx_get_sealing_key((struct tdx_sealing_key_req __user *)arg);
 	default:
 		return -ENOTTY;
 	}

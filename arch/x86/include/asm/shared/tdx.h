@@ -20,6 +20,7 @@
 #define TDG_MEM_PAGE_ACCEPT		6
 #define TDG_VM_RD			7
 #define TDG_VM_WR			8
+#define TDG_MR_KEY_GET			29
 
 /* TDX TD attributes */
 #define TDX_TD_ATTR_DEBUG_BIT		0
@@ -53,9 +54,19 @@
 #define TDCS_NOTIFY_ENABLES		0x9100000000000010
 #define TDCS_TOPOLOGY_ENUM_CONFIGURED	0x9100000000000019
 
+/*
+ * TD-scope execution-control metadata used as the default ATTRIBUTES/XFAM
+ * masks for TDG.MR.KEY.GET. Each is a single 64-bit metadata element.
+ * (CPUSVN and TEE_TCB_SVN are platform-scope values, not TD metadata, and
+ * must instead be sourced from a TDREPORT.)
+ */
+#define TDCS_ATTRIBUTES			0x1110000300000000
+#define TDCS_XFAM			0x1110000300000001
+
 /* TDCS_CONFIG_FLAGS bits */
 #define TDCS_CONFIG_FLEXIBLE_PENDING_VE	BIT_ULL(1)
 #define TDCS_CONFIG_TDX_CONNECT		BIT_ULL(5)
+#define TDCS_CONFIG_TDX_HW_SEALING	BIT_ULL(7)
 
 /* TDCS_TD_CTLS bits */
 #define TD_CTLS_PENDING_VE_DISABLE_BIT	0

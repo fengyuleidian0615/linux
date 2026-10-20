@@ -36,6 +36,7 @@
 /* Bit definitions of TDX_FEATURES0 metadata field */
 #define TDX_FEATURES0_TDXCONNECT	BIT_ULL(6)
 #define TDX_FEATURES0_TD_PRESERVING	BIT_ULL(1)
+#define TDX_FEATURES0_TDX_HW_SEALING	BIT_ULL(12)
 #define TDX_FEATURES0_NO_RBP_MOD	BIT_ULL(18)
 
 #ifndef __ASSEMBLER__
@@ -81,6 +82,8 @@ bool tdx_early_handle_ve(struct pt_regs *regs);
 int tdx_mcall_get_report0(u8 *reportdata, u8 *tdreport);
 
 int tdx_mcall_extend_rtmr(u8 index, u8 *data);
+
+int tdx_mcall_get_sealing_key(void *key_request, void *key_output, u64 requestor);
 
 u64 tdx_hcall_get_quote(u8 *buf, size_t size);
 

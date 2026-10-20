@@ -8,6 +8,8 @@
 #include <linux/export.h>
 #include <linux/io.h>
 #include <linux/kexec.h>
+#include <linux/slab.h>
+#include <uapi/linux/tdx-guest.h>
 #include <asm/coco.h>
 #include <asm/tdx.h>
 #include <asm/vmx.h>
@@ -40,6 +42,16 @@
 #define TDCALL_OPERAND_BUSY	0x80000200
 
 #define TDREPORT_SUBTYPE_0	0
+
+/*
+ * Byte offsets within a TDREPORT (TDG.MR.REPORT output) of the current
+ * platform SVNs that TDG.MR.KEY.GET binds into a non-migratable sealing key.
+ * CPUSVN lives in REPORTMACSTRUCT (report_type[4] + reserved[12]); TEE_TCB_SVN
+ * lives in TEE_TCB_INFO (which starts at offset 256, after the 8-byte valid
+ * bitmap). Both are 16 bytes.
+ */
+#define TDREPORT_CPUSVN_OFFSET		16
+#define TDREPORT_TEE_TCB_SVN_OFFSET	264
 
 static atomic_long_t nr_shared;
 
@@ -176,6 +188,119 @@ int tdx_mcall_extend_rtmr(u8 index, u8 *data)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tdx_mcall_extend_rtmr);
+
+/**
+ * tdx_mcall_get_sealing_key() - Wrapper to request a platform-bound sealing
+ *				 key using TDG.MR.KEY.GET TDCALL.
+ * @key_request: Address of the TDKEYREQUEST structure (128-byte aligned).
+ *		 Passed to the TDX module in RCX.
+ * @key_output: Output buffer that receives the derived key (32-byte aligned).
+ *		 Passed to the TDX module in RDX.
+ * @requestor: Requestor info (bits 7:0), passed in R8. 0 selects the L1 VM.
+ *
+ * Refer to the "TDG.MR.KEY.GET leaf" in the Intel TDX Module specification.
+ * The TD may request a platform-bound sealing key derived from the TD's
+ * measurements, configuration policy and SVNs. Because the key depends on
+ * per-CPU secrets (CPUSVN), it is not portable across platforms.
+ *
+ * Return 0 on success, -ENXIO for invalid operands, -EBUSY for busy
+ * operation, or -EIO on other TDCALL failures.
+ */
+int tdx_mcall_get_sealing_key(void *key_request, void *key_output, u64 requestor)
+{
+	struct tdx_key_request *req = key_request;
+	struct tdx_module_args args = {
+		.rcx = virt_to_phys(key_request),
+		.rdx = virt_to_phys(key_output),
+		.r8 = requestor,
+	};
+	u64 config, val;
+	u64 ret;
+
+	/*
+	 * attributes_mask and xfam_mask select which TD ATTRIBUTES/XFAM bits
+	 * are bound into the derived key. These are TD-scope metadata, so when
+	 * the caller leaves them zero, fall back to the TD's own values read
+	 * via TDG.VM.RD.
+	 */
+	if (!req->attributes_mask && !tdg_vm_rd(TDCS_ATTRIBUTES, &val))
+		req->attributes_mask = val;
+
+	if (!req->xfam_mask && !tdg_vm_rd(TDCS_XFAM, &val))
+		req->xfam_mask = val;
+
+	/*
+	 * cpusvn and tee_tcb_svn are *not* TD-scope metadata and cannot be read
+	 * with TDG.VM.RD. They are the current platform SVNs, which the TDX
+	 * module verifies (via SEAMGETKEY) for a non-migratable key. The guest
+	 * can only obtain them from a TDREPORT. When the caller leaves either
+	 * field zero, generate a TDREPORT and copy the current values in so the
+	 * derivation matches this platform.
+	 */
+	if (!memchr_inv(req->cpusvn, 0, sizeof(req->cpusvn)) ||
+	    !memchr_inv(req->tee_tcb_svn, 0, sizeof(req->tee_tcb_svn))) {
+		u8 *reportdata, *tdreport;
+
+		reportdata = kzalloc(TDX_REPORTDATA_LEN, GFP_KERNEL);
+		tdreport = kzalloc(TDX_REPORT_LEN, GFP_KERNEL);
+		if (reportdata && tdreport &&
+		    !tdx_mcall_get_report0(reportdata, tdreport)) {
+			if (!memchr_inv(req->cpusvn, 0, sizeof(req->cpusvn)))
+				memcpy(req->cpusvn,
+				       tdreport + TDREPORT_CPUSVN_OFFSET,
+				       sizeof(req->cpusvn));
+			if (!memchr_inv(req->tee_tcb_svn, 0,
+					sizeof(req->tee_tcb_svn)))
+				memcpy(req->tee_tcb_svn,
+				       tdreport + TDREPORT_TEE_TCB_SVN_OFFSET,
+				       sizeof(req->tee_tcb_svn));
+		}
+		kfree(tdreport);
+		kfree(reportdata);
+	}
+
+	ret = __tdcall(TDG_MR_KEY_GET, &args);
+	if (ret) {
+		/*
+		 * Debug: dump the raw TDCALL status so it can be matched
+		 * against the TDX module return codes (upper 32 bits are the
+		 * status class, lower 32 bits the operand/details).
+		 */
+		pr_err("sealing-key: TDG.MR.KEY.GET failed, raw ret=0x%llx (code=0x%llx)\n",
+		       ret, TDCALL_RETURN_CODE(ret));
+
+		/*
+		 * TDG.MR.KEY.GET only succeeds when the platform/TD supports
+		 * hardware sealing. Mirror the disable_sept_ve() pattern and
+		 * read TDCS_CONFIG_FLAGS, then report whether
+		 * TDCS_CONFIG_TDX_HW_SEALING is set. If the bit is clear, the
+		 * TDX module rejects the request (the sealing/enable_hw_keys
+		 * check), which surfaces as -EIO to userspace.
+		 */
+		tdg_vm_rd(TDCS_CONFIG_FLAGS, &config);
+		pr_err("sealing-key: TDCS_CONFIG_FLAGS=0x%llx TDX_HW_SEALING=%s\n",
+		       config,
+		       (config & TDCS_CONFIG_TDX_HW_SEALING) ? "supported" :
+							       "unsupported");
+
+		/* Dump the (possibly defaulted) key derivation inputs. */
+		pr_err("sealing-key: attributes_mask=0x%llx xfam_mask=0x%llx\n",
+		       req->attributes_mask, req->xfam_mask);
+		pr_err("sealing-key: cpusvn=%*ph\n",
+		       (int)sizeof(req->cpusvn), req->cpusvn);
+		pr_err("sealing-key: tee_tcb_svn=%*ph\n",
+		       (int)sizeof(req->tee_tcb_svn), req->tee_tcb_svn);
+
+		if (TDCALL_RETURN_CODE(ret) == TDCALL_INVALID_OPERAND)
+			return -ENXIO;
+		if (TDCALL_RETURN_CODE(ret) == TDCALL_OPERAND_BUSY)
+			return -EBUSY;
+		return -EIO;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(tdx_mcall_get_sealing_key);
 
 /**
  * tdx_hcall_get_quote() - Wrapper to request TD Quote using GetQuote

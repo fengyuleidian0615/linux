@@ -2428,6 +2428,10 @@ static int setup_tdparams(struct kvm *kvm, struct td_params *td_params,
 		pr_info("%s enabled td params TDX_CONNECT\n", __func__);
 		td_params->config_flags |= TDCS_CONFIG_TDX_CONNECT;
 	}
+	if (tdx_sysinfo->features.tdx_features0 & TDX_FEATURES0_TDX_HW_SEALING) {
+		pr_info("%s enabled td params TDX_HW_SEALING\n", __func__);
+		td_params->config_flags |= TDCS_CONFIG_TDX_HW_SEALING;
+	}
 #define MEMCPY_SAME_SIZE(dst, src)				\
 	do {							\
 		BUILD_BUG_ON(sizeof(dst) != sizeof(src));	\
