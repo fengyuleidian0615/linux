@@ -41,6 +41,14 @@
 #define TDCALL_INVALID_OPERAND	0xc0000100
 #define TDCALL_OPERAND_BUSY	0x80000200
 
+/*
+ * Maximum number of times to retry TDG.MR.KEY.GET when the TDX module reports
+ * the operand as busy (TDCALL_OPERAND_BUSY). Per the TDX module spec, an
+ * OPERAND_BUSY status is transient (the module could not take an internal
+ * lock) and the call should be retried.
+ */
+#define TDX_KEY_GET_BUSY_RETRIES	1000
+
 #define TDREPORT_SUBTYPE_0	0
 
 /*
@@ -114,6 +122,20 @@ static inline u64 tdg_vm_wr(u64 field, u64 value, u64 mask)
 	};
 
 	return __tdcall(TDG_VM_WR, &args);
+}
+
+/* Read TDX-module-scoped (global) metadata */
+static inline u64 tdg_sys_rd(u64 field, u64 *value)
+{
+	struct tdx_module_args args = {
+		.rdx = field,
+	};
+	u64 ret;
+
+	ret = __tdcall_ret(TDG_SYS_RD, &args);
+	*value = args.r8;
+
+	return ret;
 }
 
 /**
@@ -214,6 +236,7 @@ int tdx_mcall_get_sealing_key(void *key_request, void *key_output, u64 requestor
 		.rdx = virt_to_phys(key_output),
 		.r8 = requestor,
 	};
+	int retries = TDX_KEY_GET_BUSY_RETRIES;
 	u64 config, val;
 	u64 ret;
 
@@ -259,7 +282,31 @@ int tdx_mcall_get_sealing_key(void *key_request, void *key_output, u64 requestor
 		kfree(reportdata);
 	}
 
-	ret = __tdcall(TDG_MR_KEY_GET, &args);
+	/*
+	 * The TDX module may transiently report the operand as busy when it
+	 * cannot take an internal lock (e.g. on TDCS/RTMR). Per the spec, an
+	 * OPERAND_BUSY status is retryable, so loop until it clears or the
+	 * retry budget is exhausted.
+	 */
+	do {
+		ret = __tdcall(TDG_MR_KEY_GET, &args);
+
+		/*
+		 * An OPERAND_BUSY status on a request that binds any of
+		 * RTMR0-3 (tdkeypolicy.rtmr bits 0-3) is a hint that the
+		 * contended operand is an RTMR. A guest-initiated
+		 * TDG.MR.RTMR.EXTEND changes the RTMR value, so if an extend
+		 * happened since the previous successful call, the derived
+		 * sealing key will no longer match the one obtained before.
+		 */
+		if (TDCALL_RETURN_CODE(ret) == TDCALL_OPERAND_BUSY &&
+		    (req->tdkeypolicy.rtmr & GENMASK(3, 0)))
+			pr_warn_once("sealing-key: RTMR0-3 busy (rtmr=0x%x); "
+				     "an RTMR.EXTEND may change the measurement "
+				     "and thus the derived key\n",
+				req->tdkeypolicy.rtmr & GENMASK(3, 0));
+	} while (TDCALL_RETURN_CODE(ret) == TDCALL_OPERAND_BUSY && retries--);
+
 	if (ret) {
 		/*
 		 * Debug: dump the raw TDCALL status so it can be matched
@@ -452,6 +499,27 @@ static void reduce_unnecessary_ve(void)
 	enable_cpu_topology_enumeration();
 }
 
+/*
+ * A (migratable) TD can request a sealing key via TDG.MR.KEY.GET only if the
+ * host VMM configured CONFIG_FLAGS.SEALING, or the TD itself opts in by setting
+ * TDCS_TD_CTLS.ENABLE_HW_KEYS. The latter is only permitted when the TDX module
+ * enumerates TDX_FEATURES0.HW_SEALING (bit 12); otherwise ENABLE_HW_KEYS must
+ * stay 0. Enable it when supported so the guest can obtain a sealing key
+ * regardless of the VMM's CONFIG_FLAGS.SEALING setting.
+ */
+static void enable_hw_sealing_keys(void)
+{
+	u64 features0;
+
+	if (tdg_sys_rd(TDX_FEATURES0, &features0))
+		return;
+
+	if (!(features0 & TDX_FEATURES0_TDX_HW_SEALING))
+		return;
+
+	tdg_vm_wr(TDCS_TD_CTLS, TD_CTLS_ENABLE_HW_KEYS, TD_CTLS_ENABLE_HW_KEYS);
+}
+
 static void tdx_setup(u64 *cc_mask)
 {
 	struct tdx_module_args args = {};
@@ -485,6 +553,9 @@ static void tdx_setup(u64 *cc_mask)
 	disable_sept_ve(td_attr);
 
 	reduce_unnecessary_ve();
+
+	/* Opt in to hardware sealing keys if the TDX module supports it */
+	enable_hw_sealing_keys();
 }
 
 /*
