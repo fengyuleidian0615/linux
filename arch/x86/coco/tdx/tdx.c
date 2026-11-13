@@ -60,6 +60,9 @@
  */
 #define TDREPORT_CPUSVN_OFFSET		16
 #define TDREPORT_TEE_TCB_SVN_OFFSET	264
+#define TDREPORT_TEE_TCB_INFO_OFFSET	256
+#define TDREPORT_MRSEAM_OFFSET		(TDREPORT_TEE_TCB_INFO_OFFSET + 8 + 16)
+#define TDREPORT_TEE_TCB_SVN2_OFFSET	(TDREPORT_TEE_TCB_INFO_OFFSET + 8 + 16 + 48 + 48 + 8)
 
 static atomic_long_t nr_shared;
 
@@ -136,6 +139,40 @@ static inline u64 tdg_sys_rd(u64 field, u64 *value)
 	*value = args.r8;
 
 	return ret;
+}
+
+static void dump_tdx_key_request(const char *tag, const struct tdx_key_request *req)
+{
+	pr_err("sealing-key: %s key_request: keyname=%u sw_keyname=%u keysize_bitmap=0x%x policy=0x%llx attributes_mask=0x%llx xfam_mask=0x%llx isvsvn=%u mrconfigsvn=%u mrownerconfigsvn=%u cpusvn=%*ph tee_tcb_svn=%*ph salt=%*ph\n",
+	       tag, req->keyname, req->sw_keyname, req->keysize_bitmap,
+	       req->tdkeypolicy.raw, req->attributes_mask, req->xfam_mask,
+	       req->isvsvn, req->mrconfigsvn, req->mrownerconfigsvn,
+	       (int)sizeof(req->cpusvn), req->cpusvn,
+	       (int)sizeof(req->tee_tcb_svn), req->tee_tcb_svn,
+	       (int)sizeof(req->salt), req->salt);
+}
+
+/*
+ * TEE_TCB_INFO sits at TDREPORT offset 256; its fields are:
+ *   valid[8] + tee_tcb_svn[16] + mr_seam[48] + mr_signer_seam[48] +
+ *   attributes[8] + tee_tcb_svn2[16].
+ */
+static void dump_tdx_report_fields(const char *tag, const u8 *tdreport)
+{
+	u8 tee_tcb_svn[16];
+	u8 mr_seam[48];
+	u8 tee_tcb_svn2[16];
+
+	memcpy(tee_tcb_svn, tdreport + TDREPORT_TEE_TCB_SVN_OFFSET,
+	       sizeof(tee_tcb_svn));
+	memcpy(mr_seam, tdreport + TDREPORT_MRSEAM_OFFSET, sizeof(mr_seam));
+	memcpy(tee_tcb_svn2, tdreport + TDREPORT_TEE_TCB_SVN2_OFFSET,
+	       sizeof(tee_tcb_svn2));
+
+	pr_err("sealing-key: %s tdreport: tee_tcb_svn=%*ph mr_seam=%*ph tee_tcb_svn2=%*ph\n",
+	       tag, (int)sizeof(tee_tcb_svn), tee_tcb_svn,
+	       (int)sizeof(mr_seam), mr_seam,
+	       (int)sizeof(tee_tcb_svn2), tee_tcb_svn2);
 }
 
 /**
@@ -240,6 +277,8 @@ int tdx_mcall_get_sealing_key(void *key_request, void *key_output, u64 requestor
 	u64 config, val;
 	u64 ret;
 
+	dump_tdx_key_request("input", req);
+
 	/*
 	 * attributes_mask and xfam_mask select which TD ATTRIBUTES/XFAM bits
 	 * are bound into the derived key. These are TD-scope metadata, so when
@@ -268,6 +307,7 @@ int tdx_mcall_get_sealing_key(void *key_request, void *key_output, u64 requestor
 		tdreport = kzalloc(TDX_REPORT_LEN, GFP_KERNEL);
 		if (reportdata && tdreport &&
 		    !tdx_mcall_get_report0(reportdata, tdreport)) {
+			dump_tdx_report_fields("report", tdreport);
 			if (!memchr_inv(req->cpusvn, 0, sizeof(req->cpusvn)))
 				memcpy(req->cpusvn,
 				       tdreport + TDREPORT_CPUSVN_OFFSET,
@@ -281,6 +321,8 @@ int tdx_mcall_get_sealing_key(void *key_request, void *key_output, u64 requestor
 		kfree(tdreport);
 		kfree(reportdata);
 	}
+
+	dump_tdx_key_request("final", req);
 
 	/*
 	 * The TDX module may transiently report the operand as busy when it
@@ -301,10 +343,11 @@ int tdx_mcall_get_sealing_key(void *key_request, void *key_output, u64 requestor
 		 */
 		if (TDCALL_RETURN_CODE(ret) == TDCALL_OPERAND_BUSY &&
 		    (req->tdkeypolicy.rtmr & GENMASK(3, 0)))
-			pr_warn_once("sealing-key: RTMR0-3 busy (rtmr=0x%x); "
+			pr_warn_once("sealing-key: RTMR0-3 busy (rtmr=0x%llx); "
 				     "an RTMR.EXTEND may change the measurement "
 				     "and thus the derived key\n",
-				req->tdkeypolicy.rtmr & GENMASK(3, 0));
+				(unsigned long long)(req->tdkeypolicy.rtmr &
+					GENMASK(3, 0)));
 	} while (TDCALL_RETURN_CODE(ret) == TDCALL_OPERAND_BUSY && retries--);
 
 	if (ret) {
