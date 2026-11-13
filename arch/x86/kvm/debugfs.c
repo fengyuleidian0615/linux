@@ -11,6 +11,12 @@
 #include "lapic.h"
 #include "mmu.h"
 #include "mmu/mmu_internal.h"
+#include "vmx/vmx.h"
+
+#ifdef CONFIG_KVM_INTEL_TDX
+#include "vmx/tdx.h"
+#define TDX_SEAMDB_INDEX_FIELD_ID	0x8210000300000001ULL
+#endif
 
 static int vcpu_get_timer_advance_ns(void *data, u64 *val)
 {
@@ -189,8 +195,64 @@ static const struct file_operations mmu_rmaps_stat_fops = {
 	.release	= kvm_mmu_rmaps_stat_release,
 };
 
+#ifdef CONFIG_KVM_INTEL_TDX
+static int kvm_tdx_seamdb_index_show(struct seq_file *m, void *v)
+{
+	struct kvm *kvm = m->private;
+	struct kvm_tdx *kvm_tdx = container_of(kvm, struct kvm_tdx, kvm);
+	u64 value = 0, err;
+
+	err = tdh_mng_rd(&kvm_tdx->td, TDX_SEAMDB_INDEX_FIELD_ID, &value);
+	if (err) {
+		seq_printf(m, "err=0x%llx\n", err);
+		return 0;
+	}
+
+	seq_printf(m, "0x%llx\n", value);
+	return 0;
+}
+
+static int kvm_tdx_seamdb_index_open(struct inode *inode, struct file *file)
+{
+	struct kvm *kvm = inode->i_private;
+	int r;
+
+	if (!kvm_get_kvm_safe(kvm))
+		return -ENOENT;
+
+	r = single_open(file, kvm_tdx_seamdb_index_show, kvm);
+	if (r < 0)
+		kvm_put_kvm(kvm);
+
+	return r;
+}
+
+static int kvm_tdx_seamdb_index_release(struct inode *inode, struct file *file)
+{
+	struct kvm *kvm = inode->i_private;
+
+	kvm_put_kvm(kvm);
+
+	return single_release(inode, file);
+}
+
+static const struct file_operations seamdb_index_fops = {
+	.owner		= THIS_MODULE,
+	.open		= kvm_tdx_seamdb_index_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= kvm_tdx_seamdb_index_release,
+};
+#endif
+
 void kvm_arch_create_vm_debugfs(struct kvm *kvm)
 {
 	debugfs_create_file("mmu_rmaps_stat", 0644, kvm->debugfs_dentry, kvm,
 			    &mmu_rmaps_stat_fops);
+
+#ifdef CONFIG_KVM_INTEL_TDX
+	if (kvm->arch.vm_type == KVM_X86_TDX_VM)
+		debugfs_create_file("seamdb_index", 0444, kvm->debugfs_dentry,
+			    kvm, &seamdb_index_fops);
+#endif
 }
